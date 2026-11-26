@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Smart House · Панель мікроклімату</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="header-row">
+        <div>
+          <h1>Smart House · Панель мікроклімату</h1>
+          <p>Датчики в тіньовому режимі, рекомендації нейромережі, оцінка моделей і лабораторія</p>
+        </div>
+        <button type="button" id="theme-toggle" class="secondary" aria-label="Змінити тему оформлення">
+          Тема: авто
+        </button>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Розділи панелі">
+        <button
+          type="button"
+          role="tab"
+          id="tab-button-sensors"
+          aria-controls="tab-sensors"
+          aria-selected="false"
+        >
+          Датчики
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-button-files"
+          aria-controls="tab-files"
+          aria-selected="false"
+        >
+          Файли й рекомендації
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-button-compare"
+          aria-controls="tab-compare"
+          aria-selected="false"
+        >
+          Оцінка моделей
+        </button>
+        <button type="button" role="tab" id="tab-button-lab" aria-controls="tab-lab" aria-selected="false">
+          Лабораторія
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-button-history"
+          aria-controls="tab-history"
+          aria-selected="false"
+        >
+          Історія
+        </button>
+      </nav>
+    </header>
+    <main>
+      <div id="status" role="status" aria-live="polite"></div>
+      <div class="tab-panel" id="tab-sensors" role="tabpanel" aria-labelledby="tab-button-sensors" hidden>
+        <section aria-labelledby="live-title">
+          <h2 id="live-title">Датчики · тіньовий режим</h2>
+          <p>
+            Показники, які надсилають датчики (<code>POST /api/live/&lt;кімната&gt;</code> або MQTT), і
+            рекомендації моделі для кожного. Пристроями програма не керує. Підключення:
+            <code>docs/sensors.md</code>.
+          </p>
+          <label
+            >Датчик
+            <select id="live-sensor" aria-label="Датчик"></select
+          ></label>
+          <label
+            >Період
+            <select id="live-hours">
+              <option value="6">6 год</option>
+              <option value="24" selected>24 год</option>
+              <option value="168">7 днів</option>
+              <option value="720">30 днів</option>
+            </select></label
+          >
+          <label
+            >Графік
+            <select id="live-metric">
+              <option value="temperature_c">Температура, °C</option>
+              <option value="humidity_pct">Вологість, %</option>
+              <option value="co2_ppm">CO₂, ppm</option>
+              <option value="pm25_ugm3">PM2.5, мкг/м³</option>
+            </select></label
+          >
+          <div class="actions">
+            <button id="live-refresh" class="secondary">Оновити</button
+            ><label><input type="checkbox" id="live-auto" checked /> Оновлювати щохвилини</label
+            ><button id="live-notify" class="secondary">Сповіщення в браузері</button>
+          </div>
+          <p id="live-empty" class="hint" hidden>
+            Ще немає показників із датчиків. Надішліть перший показник за інструкцією в
+            <code>docs/sensors.md</code>.
+          </p>
+          <div id="live-body" hidden>
+            <canvas
+              id="live-chart"
+              width="1040"
+              height="230"
+              role="img"
+              aria-label="Графік показників датчика в часі; зелена смуга — зона комфорту, червоні мітки — початок тривог"
+            ></canvas>
+            <div class="grid">
+              <div>
+                <h3>Останній показник</h3>
+                <div id="live-latest"></div>
+              </div>
+              <div>
+                <h3>Підсумок тіньового режиму</h3>
+                <div id="live-report" class="cards"></div>
+                <p class="hint" id="live-report-note"></p>
+              </div>
+            </div>
+            <details>
+              <summary>Журнал тривог</summary>
+              <div id="live-alerts" class="scroll"></div>
+            </details>
+          </div>
+        </section>
+      </div>
+      <div class="tab-panel" id="tab-files" role="tabpanel" aria-labelledby="tab-button-files" hidden>
+        <section>
+          <h2>1. Завантажте й перевірте файл</h2>
+          <p>
+            JSON або текстова таблиця CSV/TXT з комами. Обов’язкові поля: <code>timestamp</code>,
+            <code>temperature_c</code>, <code>humidity_pct</code>.
+          </p>
+          <p class="hint">
+            До 5 МіБ і 5000 записів. JSON: один об’єкт або масив. TXT/CSV: заголовок і рядки з числами через
+            крапку. Невідомі поля та некоректні числа відхиляються.
+          </p>
+          <label for="file">Файл <input id="file" type="file" accept=".json,.csv,.txt" /></label>
+          <div class="actions">
+            <button id="validate">Перевірити файл</button
+            ><button id="import" disabled>Зберегти та отримати рекомендації</button
+            ><button class="secondary" id="sample">Завантажити приклад JSON</button>
+          </div>
+          <div id="validation" class="messages" aria-live="polite"></div>
+          <p class="hint">
+            Перевірка не зберігає дані. Імпорт зберігає всі записи разом з результатами в історії. Модель не
+            перенавчається. Пристрої фізично не перемикаються.
+          </p>
+        </section>
+        <section id="results" hidden>
+          <h2>2. Показники та рекомендації <span id="count" class="badge"></span></h2>
+          <p class="hint">
+            Погода: реальна з Open-Meteo, якщо сервер запущено з <code>--weather open-meteo</code> (поле
+            <code>weather_source</code>), інакше припущення нижче. Відсутні показники замінено типовими
+            значеннями. Зовнішня погода припускається: 15 °C, 60% вологості, 50% хмарності, без вітру та
+            опадів. Записи аналізуються незалежно. Правила пояснюють свої зміни; причини Q-оцінки нейромережі
+            не інтерпретуються.
+          </p>
+          <div class="actions">
+            <button id="download">Завантажити результат JSON</button
+            ><label
+              >Графік
+              <select id="metric">
+                <option value="temperature_c">Температура, °C</option>
+                <option value="humidity_pct">Вологість, %</option>
+                <option value="co2_ppm">CO₂, ppm</option>
+              </select></label
+            >
+          </div>
+          <canvas
+            id="chart"
+            width="1040"
+            height="230"
+            role="img"
+            aria-label="Графік вимірювань у порядку файлу; числові значення наведені в таблиці"
+          ></canvas>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Час</th>
+                  <th>°C / % / CO₂</th>
+                  <th>Рекомендації моделі + правила</th>
+                  <th>Прості правила</th>
+                  <th>Пояснення</th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+          </div>
+          <p class="hint" id="table-note"></p>
+        </section>
+      </div>
+      <div class="tab-panel" id="tab-compare" role="tabpanel" aria-labelledby="tab-button-compare" hidden>
+        <section>
+          <h2>Модель проти детермінованої системи</h2>
+          <p>
+            Обидві системи отримують однакові початкові умови, погоду й випадкові збурення. Порівнюємо модель
+            із правилами безпеки та простий термостат із тими самими правилами безпеки.
+          </p>
+          <p class="hint">
+            Це окремі симуляційні сценарії, а не оцінка економії за завантаженим файлом. Для фактичних даних
+            невідомі наслідки альтернативних дій.
+          </p>
+          <label>Епізоди <input id="episodes" type="number" min="1" max="20" value="5" /></label>
+          <label>Кроки (10 хв) <input id="steps" type="number" min="1" max="144" value="144" /></label>
+          <label>Seed <input id="seed" type="number" min="0" max="4294967275" value="42" /></label>
+          <div class="actions">
+            <button id="evaluate">Порівняти системи</button
+            ><button id="download-evaluation" class="secondary" hidden>Завантажити оцінку JSON</button>
+          </div>
+          <div id="evaluation" class="scroll" aria-live="polite"></div>
+        </section>
+        <section aria-labelledby="compare-title">
+          <h2 id="compare-title">Порівняння моделей та автоматичні перевірки</h2>
+          <p>
+            Виберіть до трьох моделей. Кожна проходить однакові сезонні сценарії й сім перевірок правил
+            безпеки. Результати містять комфорт, енергоспоживання, винагороду та кількість небезпечних кроків.
+          </p>
+          <div id="lab-models" class="actions"></div>
+          <label>Епізоди <input id="lab-episodes" type="number" min="1" max="20" value="5" /></label>
+          <label>Кроки по 10 хв <input id="lab-steps" type="number" min="1" max="144" value="144" /></label>
+          <label>Seed <input id="lab-seed" type="number" min="0" max="4294967275" value="42" /></label>
+          <label
+            >Попередній запуск для перевірки регресій
+            <select id="lab-reference">
+              <option value="">Без порівняння з попереднім запуском</option>
+            </select></label
+          >
+          <p class="hint">
+            Для регресії потрібні однакові епізоди, кроки та seed. Еталон — перша модель вибраного запуску.
+            Допуски: комфорт не нижчий більш ніж на 1 відсотковий пункт; енергія не вища більш ніж на 5%;
+            небезпечних кроків не більше. Це критерії перевірки, а не гарантія якості в реальному будинку.
+          </p>
+          <div class="actions">
+            <button id="lab-submit">Запустити у фоні</button
+            ><button id="lab-export-job" class="secondary" hidden>Завантажити порівняння JSON</button>
+          </div>
+          <p id="lab-job-status" role="status" aria-live="polite"></p>
+          <div id="lab-job-result" class="scroll"></div>
+          <details>
+            <summary>Збережені фонові запуски</summary>
+            <div id="lab-jobs"></div>
+          </details>
+        </section>
+      </div>
+      <div class="tab-panel" id="tab-lab" role="tabpanel" aria-labelledby="tab-button-lab" hidden>
+        <section aria-labelledby="lab-title">
+          <h2 id="lab-title">Майданчик тестування</h2>
+          <p>
+            Змініть показники будинку та отримайте рішення вибраної моделі з поясненнями правил безпеки.
+            Модель працює локально на CPU.
+          </p>
+          <label
+            >Модель
+            <select id="lab-model" aria-label="Модель для тестування"></select
+          ></label>
+          <label
+            >Приклад
+            <select id="lab-preset">
+              <option value="normal">Звичайні умови</option>
+              <option value="cold">Холод</option>
+              <option value="co2">Високий CO₂ під час сну</option>
+              <option value="smoke">Дим / PM2.5</option>
+            </select></label
+          >
+          <label for="lab-reading">Показники JSON</label>
+          <textarea id="lab-reading" spellcheck="false" aria-describedby="lab-assumptions"></textarea>
+          <p id="lab-assumptions" class="hint">
+            Формат та припущення такі самі, як для імпорту нижче. Зовнішня погода: 15 °C, вологість 60%,
+            хмарність 50%. Налаштування DQN фіксовані: epsilon=0, правила безпеки завжди ввімкнені. Тест не
+            керує фізичними пристроями.
+          </p>
+          <div class="actions">
+            <button id="lab-predict">Перевірити рішення</button
+            ><button id="lab-export" class="secondary" hidden>Завантажити тест JSON</button>
+          </div>
+          <div id="lab-output" aria-live="polite"></div>
+          <div id="lab-rating-box" hidden>
+            <label
+              >Ваша оцінка
+              <select id="lab-rating">
+                <option value="5">5 — відмінно</option>
+                <option value="4">4 — добре</option>
+                <option value="3">3 — задовільно</option>
+                <option value="2">2 — погано</option>
+                <option value="1">1 — неприйнятно</option>
+              </select></label
+            ><button id="lab-rate" class="secondary">Зберегти оцінку</button>
+          </div>
+        </section>
+        <section aria-labelledby="stats-title">
+          <h2 id="stats-title">Ефективність і журнал тестів</h2>
+          <div class="actions"><button id="lab-refresh" class="secondary">Оновити статистику</button></div>
+          <div id="lab-stats" class="cards"></div>
+          <p class="hint">
+            Статистика стосується лабораторії. Затримка включає завантаження моделі на першому запиті;
+            оцінювання має окрему тривалість. Повторні однакові тести беруться з кешу (до 128 результатів);
+            одночасно зберігається до трьох завантажених моделей. Локальний inference не має тарифу API;
+            вартість обладнання й електроенергії не розраховується.
+          </p>
+          <div id="lab-breakdown" class="scroll"></div>
+          <details>
+            <summary>Останні 100 запитів і помилок</summary>
+            <div id="lab-log" class="scroll"></div>
+          </details>
+        </section>
+      </div>
+      <div class="tab-panel" id="tab-history" role="tabpanel" aria-labelledby="tab-button-history" hidden>
+        <section>
+          <h2>Історія</h2>
+          <div class="actions"><button id="refresh" class="secondary">Оновити історію</button></div>
+          <div class="grid">
+            <div>
+              <h3>Імпорти</h3>
+              <div id="history"></div>
+            </div>
+            <div>
+              <h3>Оцінки моделі</h3>
+              <div id="evaluations"></div>
+            </div>
+          </div>
+          <p class="hint">
+            Останні 100 імпортів і оцінок. Попередні записи зберігаються в базі; повторне завантаження створює
+            новий імпорт.
+          </p>
+        </section>
+      </div>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

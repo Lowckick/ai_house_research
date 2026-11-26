@@ -1,0 +1,159 @@
+{
+ "dataset": "occupancy",
+ "source": {
+  "title": "UCI Occupancy Detection",
+  "doi": "10.24432/C5X01N",
+  "url": "https://archive.ics.uci.edu/dataset/357/occupancy+detection",
+  "citation": "Candanedo L. M., Feldheim V. Accurate occupancy detection of an office room from light, temperature, humidity and CO2 measurements using statistical learning models. Energy and Buildings. 2016. Vol. 112. P. 28–39."
+ },
+ "summary": {
+  "records": 20560,
+  "rejected": 0,
+  "first": "2015-02-02T14:19:00+01:00",
+  "last": "2015-02-18T09:19:00+01:00",
+  "days": 15.8,
+  "median_interval_min": 1.0,
+  "temperature_c": {
+   "min": 19.0,
+   "median": 20.7,
+   "max": 24.41
+  },
+  "humidity_pct": {
+   "min": 16.75,
+   "median": 27.29,
+   "max": 39.5
+  },
+  "co2_ppm": {
+   "min": 412.75,
+   "median": 565.42,
+   "max": 2076.5
+  },
+  "outdoor_temperature_c": null,
+  "occupied_share": 0.231,
+  "ventilation_on_share": null
+ },
+ "shadow": {
+  "sensor_id": "occupancy",
+  "hours": 380,
+  "until": "2015-02-18T09:19:00+01:00",
+  "readings": 20560,
+  "mode": "shadow: recommendations were logged, devices were not switched",
+  "first": "2015-02-02T14:19:00+01:00",
+  "last": "2015-02-18T09:19:00+01:00",
+  "median_interval_min": 1.0,
+  "gaps_over_30_min": 2,
+  "covered_hours": 343.617,
+  "observed": {
+   "time_in_comfort": {
+    "temperature_c": 1.0,
+    "humidity_pct": 0.0871,
+    "co2_ppm": 0.8493,
+    "pm25_ugm3": 1.0
+   },
+   "time_all_in_comfort": 0.0712,
+   "unsafe_readings": 614,
+   "mean": {
+    "temperature_c": 20.906,
+    "humidity_pct": 27.656,
+    "co2_ppm": 690.553,
+    "pm25_ugm3": 5.0
+   }
+  },
+  "recommendations": {
+   "differs_from_simple_controller": 18323,
+   "corrections_used": 15736,
+   "switches": 579,
+   "out_of_comfort_conditions": 21872,
+   "addressed_by_recommendation": 21872,
+   "estimated_energy_kwh_if_followed": 293.451,
+   "estimated_cost_uah_if_followed": 1023.27,
+   "simple_controller_energy_kwh": 184.355,
+   "hvac_modes": {
+    "0": 12549,
+    "1": 6229,
+    "2": 1251,
+    "3": 51,
+    "4": 480
+   },
+   "note": "Energy assumes the recommended devices ran between readings (power model of the simulator, 0.3 kW baseline included); the house was not controlled."
+  },
+  "alert_onsets": {
+   "humidity_pct:warning": 38,
+   "co2_ppm:warning": 59,
+   "co2_ppm:critical": 31
+  },
+  "weather_sources": {
+   "measured": 0,
+   "fixed": 20560
+  },
+  "network": {
+   "decisions": 20560,
+   "changed_tuned_decision": 15284,
+   "changed_share": 0.7434,
+   "changed_by_device": {
+    "hvac_mode": 480,
+    "ventilation": 1649,
+    "air_purifier": 0,
+    "humidifier_mode": 0,
+    "cleaner_bot": 13155
+   },
+   "energy_kwh_day_network": 18.58,
+   "energy_kwh_day_tuned_controller": 17.18
+  }
+ },
+ "calibration": {
+  "readings": 20560,
+  "pairs": 2055,
+  "min_pairs": 24,
+  "fits": {
+   "temperature": {
+    "slope": 0.05294801359089429,
+    "slope_se": 0.008422768725413242,
+    "intercept_c_per_h": 0.2429652986423659,
+    "r2": 0.019912906566639132,
+    "used": 1947,
+    "outliers": 108,
+    "accepted": false,
+    "simulator_default": 0.09333333333333337
+   },
+   "co2": {
+    "infiltration": 0.059849947353096254,
+    "infiltration_se": 0.00629461698077061,
+    "r2": 0.2075833689093518,
+    "used": 1693,
+    "outliers": 362,
+    "accepted": true,
+    "simulator_default_infiltration": 0.0,
+    "per_person_ppm_h": 90.46766365191037,
+    "per_person_se": 4.325362276892454,
+    "simulator_default_per_person": 20.0,
+    "per_person_accepted": true
+   },
+   "humidity": {
+    "slope": 0.004592308668185022,
+    "slope_se": 0.004635419439058946,
+    "intercept_pct_per_h": -0.16921940729526544,
+    "r2": 0.0005038476553602678,
+    "used": 1949,
+    "outliers": 106,
+    "accepted": false,
+    "simulator_default": 0.05
+   }
+  },
+  "warnings": [
+   "heat_loss_per_h: the driving difference varies too little (spread 1.06 < 2.0)",
+   "humidity_exchange_per_h: estimate 0.0046 ± 0.0046 is not significantly positive"
+  ],
+  "real_weather_share": 0.0,
+  "params": {
+   "heat_loss_per_h": null,
+   "co2_per_person_ppm_h": 90.46766365191037,
+   "co2_infiltration_per_h": 0.059849947353096254,
+   "humidity_exchange_per_h": 0.05,
+   "hvac_lag_h": null,
+   "occupancy": "random",
+   "source": "calibrated"
+  }
+ },
+ "note": "Public recordings without device actions: conditions and recommendations are analysed; the effect of following the recommendations is not."
+}

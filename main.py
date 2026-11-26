@@ -1,0 +1,550 @@
+"""
+Smart House ML Control System — Main Entry Point
+
+Usage:
+  python main.py train          Train the agent (with live dashboard)
+  python main.py train --no-ui  Train without UI (faster, logs to console)
+  python main.py simulate       Run a live simulation using trained model
+  python main.py report         Generate analytics report from training data
+  python main.py screenshots    Generate dashboard screenshots for report
+  python main.py demo           Quick 5-episode demo with dashboard
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def apply_physics(args):
+    """--physics calibration.json or --house NAME replaces the simulator's default building parameters."""
+    if getattr(args, "physics", None) and getattr(args, "house", None):
+        raise ValueError("Use either --physics or --house")
+    if getattr(args, "house", None):
+        from smart_house.environment.houses import house
+        from smart_house.environment.indoor_state import set_physics
+        set_physics(house(args.house))
+    if getattr(args, "physics", None):
+        from smart_house.analytics.calibration import load_params
+        from smart_house.environment.indoor_state import set_physics
+        set_physics(load_params(args.physics))
+
+
+def cmd_train(args):
+    apply_physics(args)
+    import datetime
+    from pathlib import Path
+
+    import torch
+
+    from smart_house.ml.experiments import run_experiment
+    torch.set_num_threads(args.threads)
+    seeds = args.seeds or [42]
+    output = args.output_dir or str(Path(__file__).resolve().parent / 'data/user/training' /
+             datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+    references = args.reference_model or []
+    if args.method == 'rollout':
+        from smart_house.ml.experiments import run_rollout_experiment
+        if args.resume:
+            raise ValueError('--resume is supported only by --method dqn')
+        run_rollout_experiment(output, seeds=seeds, rounds=args.rounds, episodes=args.rollout_episodes,
+                               steps=args.steps, horizon=args.horizon, samples=args.rollout_samples,
+                               epochs=args.distill_epochs, temperature=args.temperature, workers=args.workers,
+                               validation_episodes=args.validation_episodes or 12,
+                               test_episodes=args.test_episodes or 20, test_seeds=args.test_seeds,
+                               reference_models=references, reward_version=args.reward, hold=args.hold)
+        return
+    if len(references) > 1:
+        raise ValueError('--method dqn accepts one --reference-model')
+    callback = None
+    if not args.no_ui and len(seeds) == 1:
+        from smart_house.dashboard.display import LiveDashboard
+        callback = lambda trainer, episodes: LiveDashboard().run_with_trainer(trainer, episodes)
+    run_experiment(output, seeds=seeds, episodes=args.episodes, steps=args.steps,
+                   warmup_episodes=args.warmup_episodes, warmup_epochs=args.warmup_epochs,
+                   validation_interval=args.validation_interval, validation_episodes=args.validation_episodes or 6,
+                   test_episodes=args.test_episodes or 12, resume=args.resume,
+                   reference_model=references[0] if references else None, train_callback=callback)
+
+
+def cmd_simulate(args):
+    import time
+
+    from rich.console import Console
+    from rich.live import Live
+
+    from smart_house.dashboard.display import LiveDashboard
+    from smart_house.environment.indoor_state import DeviceState, IndoorPhysicsSimulator
+    from smart_house.environment.weather import WeatherProvider
+    from smart_house.ml.agent import encode_state
+    from smart_house.ml.rule_layer import RuleLayer
+
+    console = Console()
+    console.print("[bold cyan]Starting Smart House Simulation (inference mode)...[/bold cyan]")
+
+    from smart_house.analytics.comparison import load_agent
+    agent = load_agent(args.model)
+    physics = IndoorPhysicsSimulator()
+    weather_provider = WeatherProvider(use_api=not args.no_api)
+    rule_layer = RuleLayer()
+    dash = LiveDashboard()
+
+    indoor = physics.reset()
+    devices = DeviceState()
+    weather = weather_provider.get()
+    step = 0
+
+    with Live(dash.build_layout(), refresh_per_second=2, screen=True) as live:
+        while True:
+            state = encode_state(indoor, weather, devices)
+            action_idx = agent.select_action(state)
+            raw_devices = agent.decode_action(action_idx, devices, indoor, weather)
+            devices = rule_layer.apply(raw_devices, indoor, weather)
+
+            if step % 30 == 0:
+                weather = weather_provider.get()
+
+            indoor = physics.step(weather, devices)
+            reward = agent.reward_fn.compute(indoor, devices)
+
+            dash.update(0, step, indoor, devices, weather, reward,
+                        agent.epsilon)
+            dash._source = weather_provider.source
+            live.update(dash.build_layout())
+
+            step += 1
+            time.sleep(args.speed)
+
+
+def cmd_report(args):
+    import os
+
+    from smart_house.analytics.reporter import generate_training_report, print_text_summary
+    from smart_house.ml.trainer import DB_PATH
+
+    db = os.path.abspath(args.db or DB_PATH)
+    print_text_summary(db)
+    path = generate_training_report(db, args.output) if args.output else generate_training_report(db)
+    if path:
+        print(f"Report image: {path}")
+
+
+def cmd_screenshots(args):
+    from smart_house.analytics.screenshots import generate_simulation_screenshots
+
+    paths = generate_simulation_screenshots(
+        output_dir=args.output,
+        count=args.count,
+        use_api_weather=not args.no_api,
+        steps=args.steps,
+        model_path=args.model,
+    )
+    if not paths:
+        print("No screenshots were generated.")
+        return
+    print("Generated screenshots:")
+    for path in paths:
+        print(f"  {path}")
+
+
+def weather_source(args):
+    """ArchiveWeather when --weather open-meteo is requested, otherwise None (fixed assumption)."""
+    if getattr(args, "weather", "fixed") != "open-meteo":
+        return None
+    from pathlib import Path
+
+    from smart_house.environment.weather_archive import ArchiveWeather
+    cache = Path(__file__).resolve().parent / "data" / "user" / "weather-cache.json"
+    return ArchiveWeather(args.lat, args.lon, cache_path=cache)
+
+
+def cmd_import_data(args):
+    import json
+    from pathlib import Path
+
+    from smart_house.analytics.history import History
+    from smart_house.analytics.ingestion import ImportService, ValidationError
+    from smart_house.environment.readings import MAX_FILE_BYTES
+
+    source, target = Path(args.input), Path(args.output)
+    if source.resolve() == target.resolve():
+        raise ValueError("Input and output paths must be different")
+    if target.exists():
+        raise ValueError("Output already exists; choose a new --output path")
+    if source.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError("File exceeds 5 MiB")
+    try:
+        payload = ImportService(args.model, History(args.db), weather_source(args)).import_text(
+            source.name, source.read_text(encoding="utf-8-sig"))
+    except ValidationError as exc:
+        raise ValueError(json.dumps(exc.report, ensure_ascii=False)) from exc
+    write_json(target, payload)
+    print(f"Imported {payload['count']} readings (history #{payload['id']}). Recommendations saved to: {target}")
+    weather = payload['weather']
+    if weather['mode'] == 'open-meteo':
+        print(f"Weather: Open-Meteo for {weather['open_meteo_readings']} readings, "
+              f"fixed assumption for {weather['fixed_readings']}" + (f"; errors: {weather['errors']}" if weather['errors'] else ""))
+
+
+def cmd_mqtt(args):
+    """Subscribe to sensor topics and log shadow-mode recommendations for every message."""
+    import json
+
+    from smart_house.analytics.history import History
+    from smart_house.analytics.ingestion import ImportService, ValidationError
+    from smart_house.analytics.live import LiveService, handle_mqtt_message
+    from smart_house.web.server import notifier_from_env
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError as exc:
+        raise ValueError("MQTT needs the optional package: pip install paho-mqtt") from exc
+    service = LiveService(ImportService(args.model, History(args.db), weather_source(args)), notifier_from_env())
+    client = (mqtt.Client(mqtt.CallbackAPIVersion.VERSION2) if hasattr(mqtt, "CallbackAPIVersion") else mqtt.Client())
+    if args.username:
+        client.username_pw_set(args.username, os.environ.get("MQTT_PASSWORD"))
+    if args.tls:
+        client.tls_set()
+
+    def on_connect(client, userdata, *rest):
+        client.subscribe(args.topic)
+        print(f"Subscribed to {args.topic} on {args.broker}:{args.port}", flush=True)
+
+    def on_message(client, userdata, message):
+        try:
+            record = handle_mqtt_message(service, message.topic, message.payload, args.topic)
+            alerts = "; ".join(a["message"] for a in record["new_alerts"])
+            print(f"{record['sensor_id']} {record['timestamp']}: action {record['action_index']}"
+                  + (f" | {alerts}" if alerts else ""), flush=True)
+        except ValidationError as exc:
+            print(f"Rejected {message.topic}: {json.dumps(exc.report['errors'], ensure_ascii=False)}", flush=True)
+        except (ValueError, UnicodeError) as exc:
+            print(f"Rejected {message.topic}: {exc}", flush=True)
+
+    client.on_connect, client.on_message = on_connect, on_message
+    client.connect(args.broker, args.port)
+    try:
+        client.loop_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_shadow_report(args):
+    from smart_house.analytics.history import History
+    from smart_house.analytics.ingestion import ImportService
+    from smart_house.analytics.live import LiveService
+    report = LiveService(ImportService(args.model, History(args.db))).report(args.sensor, args.hours)
+    write_json(args.output, report)
+    print(f"{report['readings']} readings of {args.sensor} in the last {args.hours} h; report: {args.output}")
+
+
+def cmd_calibrate(args):
+    """Fit simulator parameters to recorded readings (a live sensor or a readings file)."""
+    from pathlib import Path
+
+    from smart_house.analytics.calibration import calibrate, rows_from_records
+    if Path(args.output).exists():
+        raise ValueError("Output already exists; choose a new --output path")
+    if bool(args.sensor) == bool(args.input):
+        raise ValueError("Give exactly one of --sensor (live readings) or --input (readings file)")
+    if args.sensor:
+        import datetime as dt
+
+        from smart_house.analytics.history import History
+        from smart_house.analytics.ingestion import ImportService
+        from smart_house.analytics.live import LiveService
+        live = LiveService(ImportService(args.model, History(args.db)))
+        records = live.readings(args.sensor, live.clock() - dt.timedelta(hours=args.hours), limit=5000)
+    else:
+        from smart_house.environment.readings import inspect_readings
+        source = Path(args.input)
+        records, report = inspect_readings(source.read_text(encoding="utf-8-sig"), source.suffix)
+        if not report["valid"]:
+            raise ValueError(f"Readings file is invalid: {report['errors'][:5]}")
+    rows, weather = rows_from_records(records, weather_source(args))
+    report = calibrate(rows)
+    report["weather"] = weather
+    if weather["fixed_readings"]:
+        report["warnings"].append("Outdoor weather is the fixed 15 C assumption for some readings; "
+                                  "use --weather open-meteo for heat-loss and humidity estimates.")
+    write_json(args.output, report)
+    print(f"{report['pairs']} reading pairs; parameters: {report['params']}")
+    for warning in report["warnings"]:
+        print("Warning:", warning)
+
+
+def cmd_adapt(args):
+    """Adaptation study across house variants (see smart_house/ml/adaptation.py); resumable per house."""
+    import torch
+
+    from smart_house.ml.adaptation import run_adaptation
+    torch.set_num_threads(args.threads)
+    run_adaptation(args.output_dir, args.houses, seeds=args.seeds, rounds=args.rounds, episodes=args.rollout_episodes,
+                   workers=args.workers, validation_episodes=args.validation_episodes,
+                   test_episodes=args.test_episodes, test_seeds=args.test_seeds)
+    print(f"Report: {args.output_dir}/adaptation.json")
+
+
+def cmd_figures(args):
+    """Regenerate the result figures in docs/images from the published reports."""
+    from smart_house.analytics.figures import generate
+    for path in generate(args.output):
+        print(path)
+
+
+def cmd_public_data(args):
+    """Analyse a downloaded public UCI dataset: validation, shadow-mode replay, calibration."""
+    from pathlib import Path
+
+    from smart_house.analytics.public_data import analyze
+    if Path(args.output).exists():
+        raise ValueError("Output already exists; choose a new --output path")
+    report = analyze(args.dataset, args.input, args.model)
+    write_json(args.output, report)
+    s, n = report["summary"], report["shadow"]["network"]
+    print(f"{args.dataset}: {s['records']} records over {s['days']} days; network changed "
+          f"{n['changed_share']:.0%} of decisions; calibrated: {report['calibration']['params']}")
+
+
+def write_json(path, payload):
+    import json
+    from pathlib import Path
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("x", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2, default=str, allow_nan=False)
+        stream.write("\n")
+
+
+def cmd_validate_data(args):
+    import json
+    from pathlib import Path
+
+    from smart_house.environment.readings import MAX_FILE_BYTES, inspect_readings
+    source = Path(args.input)
+    if source.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError("File exceeds 5 MiB")
+    _, report = inspect_readings(source.read_text(encoding="utf-8-sig"), source.suffix)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if not report['valid']:
+        raise ValueError("File validation failed; see report above")
+
+
+def cmd_evaluate(args):
+    from pathlib import Path
+
+    from smart_house.analytics.history import History
+    from smart_house.analytics.ingestion import ImportService
+    if Path(args.output).exists():
+        raise ValueError("Output already exists; choose a new --output path")
+    apply_physics(args)
+    payload = ImportService(args.model, History(args.db)).evaluate(args.episodes, args.steps, args.seed)
+    write_json(args.output, payload)
+    print(f"Evaluation #{payload['id']} saved to: {args.output}")
+
+
+def cmd_demo(args):
+    # Reuse all training defaults for the demo command.
+    main(["train", "--episodes", "5"] + (["--no-ui"] if args.no_ui else []))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Smart House ML Control System",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = parser.add_subparsers(dest="command")
+    # Best flat-price model; pass --model data/models/rollout-v3-tou.pt for a two-zone tariff.
+    default_model = os.path.join(os.path.dirname(__file__), "data", "models", "rollout-v2.pt")
+
+    # train
+    p_train = sub.add_parser("train", help="Train a residual policy (DQN or rollout distillation)")
+    p_train.add_argument("--physics", help="Calibration report from `calibrate`; default simulator otherwise")
+    p_train.add_argument("--house", help="Named building variant from smart_house/environment/houses.py")
+    p_train.add_argument("--method", choices=("dqn", "rollout"), default="dqn",
+                         help="dqn: original warmup + DQN; rollout: rollout labels distilled into the network (residual_v2)")
+    p_train.add_argument("--episodes", type=int, default=200, help="Number of training episodes")
+    p_train.add_argument("--no-ui", action="store_true", help="Disable live dashboard")
+    p_train.add_argument("--no-api", action="store_true", help="Compatibility flag: training always uses seasonal synthetic weather")
+    p_train.add_argument("--seeds", type=int, nargs="+", help="Distinct training seeds; default: 42")
+    p_train.add_argument("--steps", type=int, default=144)
+    p_train.add_argument("--output-dir", help="New experiment directory; original data/model.pt is preserved")
+    p_train.add_argument("--warmup-episodes", type=int, default=12)
+    p_train.add_argument("--warmup-epochs", type=int, default=5)
+    p_train.add_argument("--validation-interval", type=int, default=5)
+    p_train.add_argument("--validation-episodes", type=int, help="Default: 6 for dqn, 12 for rollout")
+    p_train.add_argument("--test-episodes", type=int, help="Default: 12 for dqn, 20 for rollout")
+    p_train.add_argument("--threads", type=int, choices=range(1, 17), default=2)
+    p_train.add_argument("--resume", help="Warm start from a residual checkpoint; replay buffer is regenerated")
+    p_train.add_argument("--reference-model", action="append",
+                         help="Checkpoint to evaluate on identical test scenarios (repeatable for rollout)")
+    p_train.add_argument("--reward", choices=("comfort_safety_v2", "comfort_safety_tou_v3"), default="comfort_safety_v2",
+                         help="rollout: reward; tou_v3 weights energy by the day/night tariff")
+    p_train.add_argument("--rounds", type=int, default=3, help="rollout: labelling rounds (first expert, then DAgger)")
+    p_train.add_argument("--rollout-episodes", type=int, default=48, help="rollout: new training episodes per round")
+    p_train.add_argument("--horizon", type=int, default=18, help="rollout: lookahead steps of 10 minutes")
+    p_train.add_argument("--hold", type=int, default=1,
+                         help="rollout: steps a correction is held in the lookahead (6 = 1 hour, e.g. pre-heating)")
+    p_train.add_argument("--rollout-samples", type=int, default=1, help="rollout: noise samples per label")
+    p_train.add_argument("--distill-epochs", type=int, default=30)
+    p_train.add_argument("--temperature", type=float, default=0.05, help="rollout: soft-label temperature, 0 = hard labels")
+    p_train.add_argument("--workers", type=int, help="rollout: labelling processes; default min(4, CPU count)")
+    p_train.add_argument("--test-seeds", type=int, nargs="+", default=[20000, 31000],
+                         help="rollout: test scenario seeds, evaluated only after selection")
+
+    # simulate
+    p_sim = sub.add_parser("simulate", help="Live simulation (inference only)")
+    p_sim.add_argument("--no-api", action="store_true", help="Skip weather API")
+    p_sim.add_argument("--speed", type=float, default=1.0, help="Seconds between steps")
+
+    p_sim.add_argument("--model", default=default_model)
+
+    # report
+    p_rep = sub.add_parser("report", help="Generate training analytics report")
+    p_rep.add_argument("--db", help="Training SQLite database; defaults to data/legacy/training.db (first DQN run)")
+    p_rep.add_argument("--output", help="Directory for generated reports")
+
+    # screenshots
+    p_shot = sub.add_parser("screenshots", help="Generate dashboard screenshots for the coursework report")
+    p_shot.add_argument("--count", type=int, default=4, help="Number of PNG screenshots to generate")
+    p_shot.add_argument("--steps", type=int, default=144, help="Number of simulated steps")
+    p_shot.add_argument("--no-api", action="store_true", help="Skip weather API")
+    p_shot.add_argument("--output", default=None, help="Output directory")
+    p_shot.add_argument("--model", default=default_model)
+
+    default_db = os.path.join(os.path.dirname(__file__), "data", "user", "measurements.db")
+    p_import = sub.add_parser("import-data", help="Validate, store indoor readings and generate recommendations")
+    p_import.add_argument("--input", required=True, help="UTF-8 JSON, CSV or TXT file")
+    p_import.add_argument("--output", required=True, help="New JSON output file (never overwritten)")
+    p_import.add_argument("--weather", choices=("fixed", "open-meteo"), default="fixed",
+                         help="Outdoor weather for readings: fixed 15 C assumption or Open-Meteo history (cached)")
+    p_import.add_argument("--lat", type=float, default=50.4501, help="Latitude for --weather open-meteo (default Kyiv)")
+    p_import.add_argument("--lon", type=float, default=30.5234, help="Longitude for --weather open-meteo")
+    p_import.add_argument("--model", default=default_model, help="Trusted trained PyTorch checkpoint")
+    p_import.add_argument("--db", default=default_db, help="Separate measurement history SQLite database")
+
+    p_validate = sub.add_parser("validate-data", help="Report all file errors and warnings without importing")
+    p_validate.add_argument("--input", required=True)
+
+    p_eval = sub.add_parser("evaluate", help="Compare DQN with deterministic control in paired simulation")
+    p_eval.add_argument("--physics", help="Calibration report from `calibrate`; default simulator otherwise")
+    p_eval.add_argument("--house", help="Named building variant from smart_house/environment/houses.py")
+    p_eval.add_argument("--episodes", type=int, default=5)
+    p_eval.add_argument("--steps", type=int, default=144)
+    p_eval.add_argument("--seed", type=int, default=42)
+    p_eval.add_argument("--model", default=default_model)
+    p_eval.add_argument("--db", default=default_db)
+    p_eval.add_argument("--output", required=True)
+
+    p_web = sub.add_parser("web", help="Start browser upload, history and evaluation interface")
+    p_web.add_argument("--host", default="127.0.0.1")
+    p_web.add_argument("--port", type=int, default=8000)
+    p_web.add_argument("--demo", action="store_true",
+                       help="Fill a separate demo database (data/user/demo.db) with simulated data, then serve it")
+    p_web.add_argument("--weather", choices=("fixed", "open-meteo"), default="fixed",
+                         help="Outdoor weather for readings: fixed 15 C assumption or Open-Meteo history (cached)")
+    p_web.add_argument("--lat", type=float, default=50.4501, help="Latitude for --weather open-meteo (default Kyiv)")
+    p_web.add_argument("--lon", type=float, default=30.5234, help="Longitude for --weather open-meteo")
+    p_web.add_argument("--model", default=default_model)
+    p_web.add_argument("--db", default=default_db)
+
+    # demo
+    p_mqtt = sub.add_parser("mqtt", help="Subscribe to MQTT sensor topics (shadow mode, needs paho-mqtt)")
+    p_mqtt.add_argument("--broker", required=True)
+    p_mqtt.add_argument("--port", type=int, default=1883)
+    p_mqtt.add_argument("--topic", default="home/+/climate", help="One '+' level is the sensor id")
+    p_mqtt.add_argument("--username", help="Password is read from MQTT_PASSWORD")
+    p_mqtt.add_argument("--tls", action="store_true")
+    p_mqtt.add_argument("--model", default=default_model)
+    p_mqtt.add_argument("--db", default=default_db)
+    p_mqtt.add_argument("--weather", choices=("fixed", "open-meteo"), default="fixed")
+    p_mqtt.add_argument("--lat", type=float, default=50.4501)
+    p_mqtt.add_argument("--lon", type=float, default=30.5234)
+
+    p_shadow = sub.add_parser("shadow-report", help="Summarise live readings and logged recommendations")
+    p_shadow.add_argument("--sensor", required=True)
+    p_shadow.add_argument("--hours", type=int, default=24)
+    p_shadow.add_argument("--model", default=default_model)
+    p_shadow.add_argument("--db", default=default_db)
+    p_shadow.add_argument("--output", required=True)
+
+    p_cal = sub.add_parser("calibrate", help="Fit simulator parameters (heat loss, CO2, humidity) to readings")
+    p_cal.add_argument("--sensor", help="Live sensor id stored by the web/MQTT ingestion")
+    p_cal.add_argument("--hours", type=int, default=24 * 14, help="Live readings from the last N hours")
+    p_cal.add_argument("--input", help="Readings file (.json/.csv/.txt) instead of a live sensor")
+    p_cal.add_argument("--model", default=default_model)
+    p_cal.add_argument("--db", default=default_db)
+    p_cal.add_argument("--weather", choices=("fixed", "open-meteo"), default="open-meteo")
+    p_cal.add_argument("--lat", type=float, default=50.4501)
+    p_cal.add_argument("--lon", type=float, default=30.5234)
+    p_cal.add_argument("--output", required=True)
+
+    p_adapt = sub.add_parser("adapt", help="Compare fixed/retuned rules and default/retrained networks across houses")
+    p_adapt.add_argument("--houses", nargs="+", default=["default", "realistic_co2", "poor_insulation",
+                                                          "lagged_schedule", "combined"])
+    p_adapt.add_argument("--seeds", type=int, nargs="+", default=[42, 43])
+    p_adapt.add_argument("--rounds", type=int, default=3)
+    p_adapt.add_argument("--rollout-episodes", type=int, default=48)
+    p_adapt.add_argument("--workers", type=int)
+    p_adapt.add_argument("--validation-episodes", type=int, default=12)
+    p_adapt.add_argument("--test-episodes", type=int, default=20)
+    p_adapt.add_argument("--test-seeds", type=int, nargs="+", default=[20000, 31000])
+    p_adapt.add_argument("--threads", type=int, default=2)
+    p_adapt.add_argument("--output-dir", required=True, help="Reusing the directory resumes finished houses")
+
+    p_fig = sub.add_parser("figures", help="Regenerate result figures (docs/images) from the published reports")
+    p_fig.add_argument("--output", default=os.path.join(os.path.dirname(__file__), "docs", "images"))
+
+    p_pub = sub.add_parser("public-data", help="Analyse a public UCI sensor dataset (see docs/public-data.md)")
+    p_pub.add_argument("--dataset", required=True, choices=("occupancy", "appliances", "sml2010"))
+    p_pub.add_argument("--input", required=True, help="Directory with the unpacked UCI files")
+    p_pub.add_argument("--model", default=default_model)
+    p_pub.add_argument("--output", required=True)
+
+    p_demo = sub.add_parser("demo", help="Quick 5-episode demo with dashboard")
+    p_demo.add_argument("--no-api", action="store_true")
+    p_demo.add_argument("--no-ui", action="store_true")
+
+    args = parser.parse_args(argv)
+
+    if args.command in {"import-data", "validate-data", "evaluate", "web", "mqtt", "shadow-report", "calibrate", "adapt",
+                        "public-data"}:
+        try:
+            if args.command == "web":
+                from smart_house.web.server import serve
+                if args.demo:
+                    from smart_house.analytics.demo import seed_demo
+                    args.db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "user", "demo.db")
+                    print("Preparing demo data (simulated sensors, an import and an evaluation)...", flush=True)
+                    summary = seed_demo(args.db, args.model)
+                    print(f"Demo database: {summary['database']} · sensors: {', '.join(summary['sensors'])}", flush=True)
+                    print(f"Open http://{args.host}:{args.port}/ in a browser.", flush=True)
+                serve(args.host, args.port, args.model, args.db, weather_source(args))
+            else:
+                {"import-data": cmd_import_data, "validate-data": cmd_validate_data, "evaluate": cmd_evaluate,
+                 "mqtt": cmd_mqtt, "shadow-report": cmd_shadow_report, "calibrate": cmd_calibrate,
+                 "adapt": cmd_adapt, "public-data": cmd_public_data}[args.command](args)
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            parser.exit(2, f"Command failed: {exc}\n")
+    elif args.command == "train":
+        try:
+            cmd_train(args)
+        except (OSError, ValueError, RuntimeError) as exc:
+            parser.exit(2, f"Training failed: {exc}\n")
+    elif args.command == "simulate":
+        cmd_simulate(args)
+    elif args.command == "report":
+        cmd_report(args)
+    elif args.command == "screenshots":
+        cmd_screenshots(args)
+    elif args.command == "figures":
+        cmd_figures(args)
+    elif args.command == "demo":
+        cmd_demo(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
